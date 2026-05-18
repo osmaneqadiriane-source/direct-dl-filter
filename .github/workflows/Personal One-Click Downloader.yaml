@@ -1,0 +1,97 @@
+name: 🚀 Personal One-Click Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'آدرس‌های دانلود (با فاصله جدا کنید)'
+        required: true
+        type: string
+      password:
+        description: 'رمز عبور زیپ (اختیاری)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  download-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 zip curl bc
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git config --global http.postBuffer 524288000
+
+      - name: Smart Download Engine
+        run: |
+          URLS="${{ github.event.inputs.urls }}"
+          mkdir -p tmp_downloads
+          
+          for URL in $URLS; do
+            FILE=$(basename "${URL%%\?*}" | sed 's/%20/ /g')
+            [ -z "$FILE" ] && FILE="file_$(date +%s)"
+            
+            aria2c --max-connection-per-server=16 --split=16 --dir="tmp_downloads" -o "$FILE" "$URL" || \
+            curl -L -o "tmp_downloads/$FILE" "$URL"
+          done
+
+      - name: Process and Split
+        run: |
+          PASS="${{ github.event.inputs.password }}"
+          SPLIT_MB=90
+          BACKUP_DIR="/tmp/final_files"
+          mkdir -p "$BACKUP_DIR"
+
+          cd tmp_downloads
+          for FILE in *; do
+            [ -f "$FILE" ] || continue
+            FILE_SIZE=$(du -h "$FILE" | cut -f1)
+            FOLDER_NAME="${FILE}_dir"
+            TARGET_PATH="$BACKUP_DIR/$FOLDER_NAME"
+            mkdir -p "$TARGET_PATH"
+            
+            # همیشه پارت‌بندی میکنیم تا گیت‌هاب خطا ندهد
+            if [ -n "$PASS" ]; then
+              zip -0 -s "${SPLIT_MB}m" -P "$PASS" "$TARGET_PATH/${FILE}.zip" "$FILE"
+            else
+              zip -0 -s "${SPLIT_MB}m" "$TARGET_PATH/${FILE}.zip" "$FILE"
+            fi
+            
+            # ایجاد صفحه راهنما با لینک دانلود یکجا
+            REPO="${{ github.repository }}"
+            BRANCH="${{ github.ref_name }}"
+            CODELOAD_LINK="https://codeload.github.com/$REPO/zip/refs/heads/$BRANCH"
+            
+            echo "## 📦 دانلود کل پروژه (تمام پارت‌ها یکجا)" > "$TARGET_PATH/README.md"
+            echo "برای دانلود تمام فایل‌های این پوشه به صورت یکجا، روی لینک زیر کلیک کنید:" >> "$TARGET_PATH/README.md"
+            echo "### [📥 دانلود کل این مخزن بصورت ZIP]($CODELOAD_LINK)" >> "$TARGET_PATH/README.md"
+            echo "" >> "$TARGET_PATH/README.md"
+            echo "---" >> "$TARGET_PATH/README.md"
+            echo "- **نام فایل اصلی:** $FILE" >> "$TARGET_PATH/README.md"
+            echo "- **حجم کل:** $FILE_SIZE" >> "$TARGET_PATH/README.md"
+          done
+          echo "$BACKUP_DIR" > /tmp/backup_path.txt
+
+      - name: Incremental Push
+        run: |
+          BACKUP=$(cat /tmp/backup_path.txt)
+          mkdir -p downloads
+          cp -r "$BACKUP"/* downloads/
+          git add downloads/
+          git commit -m "🚀 New personal download added [skip ci]" || exit 0
+          git push origin HEAD:${{ github.ref_name }}
